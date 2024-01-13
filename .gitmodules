@@ -1,0 +1,18 @@
+[submodule "includes/glfw"]
+	path = includes/glfw
+	url = https://github.com/glfw/glfw.git
+[submodule "includes/imgui"]
+	path = includes/imgui
+	url = https://github.com/ocornut/imgui.git
+[submodule "includes/glad"]
+	path = includes/glad
+	url = https://github.com/Dav1dde/glad.git
+[submodule "includes/glm"]
+	path = includes/glm
+	url = https://github.com/g-truc/glm.git
+[submodule "includes/fmt"]
+	path = includes/fmt
+	url = https://github.com/fmtlib/fmt.git
+[submodule "includes/assimp"]
+	path = includes/assimp
+	url = https://github.com/assimp/assimp.git

@@ -1,0 +1,6 @@
+function main() {
+  EXECUTABLE=${1:?"executable required"}
+  cd ./build; "./${EXECUTABLE}"
+}
+
+main "$@"

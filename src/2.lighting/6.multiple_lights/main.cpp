@@ -1,0 +1,459 @@
+#include <vector>
+#include <string>
+#include <fstream>
+#include <iostream>
+#include <sstream>
+#include <format>
+#include <filesystem>
+#include <cmath>
+#include <optional>
+#include <fmt/core.h>
+#include <glad/gl.h>
+#include <GLFW/glfw3.h>
+#include <stb_image.h>
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/type_ptr.hpp>
+#include "imgui.h"
+#include "imgui_impl_glfw.h"
+#include "imgui_impl_opengl3.h"
+
+struct State
+{
+  glm::vec3 cameraPosition;
+  glm::vec3 cameraFront;
+  glm::vec3 cameraUp;
+  float cameraSpeed;
+  float cameraSensitivity;
+  glm::vec3 lightPosition;
+  glm::vec3 lightColor;
+  glm::vec3 cubeColor;
+  float deltaTime;
+  float lastFrame;
+  float fov;
+  float yaw;
+  float pitch;
+  std::optional<float> lastX;
+  std::optional<float> lastY;
+};
+
+std::string readFile(std::filesystem::path& path)
+{
+  std::ifstream handle;
+  std::string content;
+  handle.exceptions(std::ifstream::failbit | std::ifstream::badbit);
+  try
+  {
+    handle.open(path);
+    std::stringstream stream;
+    stream << handle.rdbuf();
+    handle.close();
+    content = stream.str();
+  }
+  catch (std::ifstream::failure& error)
+  {
+      std::cout << "ERROR::SHADER::FILE_NOT_SUCCESSFULLY_READ: " << error.what() << std::endl;
+  }
+  return content;
+}
+
+unsigned char* readImage(std::filesystem::path& path, int& width, int& height, int& nrChannels)
+{
+  return stbi_load(path.c_str(), &width, &height, &nrChannels, 0);
+}
+
+unsigned int createShader(GLenum shaderType, const char* shaderSource)
+{
+  unsigned int shader = glCreateShader(shaderType);
+  glShaderSource(shader, 1, &shaderSource, NULL);
+  glCompileShader(shader);
+  int success;
+  char infoLog[512];
+  glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
+  if(!success)
+  {
+    glGetShaderInfoLog(shader, 512, NULL, infoLog);
+    std::cout << "ERROR::SHADER::" << shaderType << "COMPILATION_FAILED\n" << infoLog << std::endl;
+  }
+  return shader;
+}
+
+unsigned int createShaderProgram(std::vector<unsigned int>& shaders)
+{
+  unsigned int shaderProgram = glCreateProgram();
+  for (unsigned int& shader: shaders)
+  {
+    glAttachShader(shaderProgram, shader);
+  }
+  glLinkProgram(shaderProgram);
+  int success;
+  char infoLog[512];
+  glGetProgramiv(shaderProgram, GL_LINK_STATUS, &success);
+  if(!success) {
+    glGetProgramInfoLog(shaderProgram, 512, NULL, infoLog);
+    std::cout << "ERROR::SHADER_PROGRAM::LINKING_FAILED\n" << infoLog << std::endl;
+  }
+  return shaderProgram;
+}
+
+GLenum textureFormatFromChannel(int nrChannels)
+{
+  GLenum format;
+  if (nrChannels == 1)
+      format = GL_RED;
+  else if (nrChannels == 3)
+      format = GL_RGB;
+  else if (nrChannels == 4)
+      format = GL_RGBA;
+  return format;
+}
+
+void handleInput(GLFWwindow* window, State* state)
+{
+    if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
+      glfwSetWindowShouldClose(window, true);
+    float cameraTravel = static_cast<float>(state->cameraSpeed * state->deltaTime);
+    if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
+      state->cameraPosition += cameraTravel * state->cameraFront;
+    if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS)
+      state->cameraPosition -= cameraTravel * state->cameraFront;
+    if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS)
+      state->cameraPosition -= glm::normalize(glm::cross(state->cameraFront, state->cameraUp)) * cameraTravel;
+    if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS)
+      state->cameraPosition += glm::normalize(glm::cross(state->cameraFront, state->cameraUp)) * cameraTravel;
+}
+
+void handleFrameBufferUpdate(GLFWwindow* window, int width, int height)
+{
+  glViewport(0, 0, width, height);
+}
+
+void handleMouseUpdate(GLFWwindow* window, double xposIn, double yposIn)
+{
+  State* state = static_cast<State*>(glfwGetWindowUserPointer(window));
+  float xpos = static_cast<float>(xposIn);
+  float ypos = static_cast<float>(yposIn);
+  float xoffset;
+  float yoffset;
+  
+  try {
+    float lastX = state->lastX.value();
+    xoffset = xpos - lastX;
+  } catch(const std::bad_optional_access& e) {
+    xoffset = 0;
+  }
+  try {
+    float lastY = state->lastY.value();
+    yoffset = lastY - ypos;
+  } catch(const std::bad_optional_access& e) {
+    yoffset = 0;
+  }
+
+  state->lastX = xpos;
+  state->lastY = ypos;
+  xoffset *= state->cameraSensitivity;
+  yoffset *= state->cameraSensitivity;
+  state->yaw += xoffset;
+  state->pitch += yoffset;
+  state->pitch = std::clamp(state->pitch, -89.0f, 89.0f);
+
+  glm::vec3 front;
+  front.x = cos(glm::radians(state->yaw)) * cos(glm::radians(state->pitch));
+  front.y = sin(glm::radians(state->pitch));
+  front.z = sin(glm::radians(state->yaw)) * cos(glm::radians(state->pitch));
+  state->cameraFront = glm::normalize(front);
+}
+
+void handleScrollUpdate(GLFWwindow* window, double xoffset, double yoffset)
+{
+  State* state = static_cast<State*>(glfwGetWindowUserPointer(window));
+  state->fov -= (float)yoffset;
+  state->fov = std::clamp(state->fov, 1.0f, 45.0f);
+}
+
+int main()
+{
+  const GLuint width = 800, height = 600;
+  const std::string staticFilePath = {STATIC_FILE_PATH};
+  std::filesystem::path cubeVertexShaderFilePath = staticFilePath;
+  cubeVertexShaderFilePath /= "cube.vert";
+  std::filesystem::path cubeFragmentShaderFilePath = staticFilePath;
+  cubeFragmentShaderFilePath /= "cube.frag";
+  std::filesystem::path lightSourceVertexShaderFilePath = staticFilePath;
+  lightSourceVertexShaderFilePath /= "light-source.vert";
+  std::filesystem::path lightSourceFragmentShaderFilePath = staticFilePath;
+  lightSourceFragmentShaderFilePath /= "light-source.frag";
+  std::filesystem::path containerTextureFilePath = staticFilePath;
+  containerTextureFilePath /= "container.png";
+  std::filesystem::path containerSpecularTextureFilePath = staticFilePath;
+  containerSpecularTextureFilePath /= "container_specular.png";
+  std::filesystem::path awesomeFaceTextureFilePath = staticFilePath;
+  awesomeFaceTextureFilePath /= "awesomeface.png";
+  State state = {
+    .cameraPosition = glm::vec3(0.0f, 0.0f, 3.0f),
+    .cameraFront = glm::vec3(0.0f, 0.0f, -1.0f),
+    .cameraUp = glm::vec3(0.0f, 1.0f,  0.0f),
+    .cameraSpeed = 2.5,
+    .cameraSensitivity = 0.5f,
+    .lightPosition = glm::vec3(1.2f, 1.0f, 2.0f),
+    .lightColor = glm::vec3(1.0f, 1.0f, 1.0f),
+    .cubeColor = glm::vec3(1.0f, 0.5f, 0.31f),
+    .fov = 45.0f,
+    .yaw = -90.0f,
+    .pitch = 0.0f,
+    .deltaTime = 0.0f,
+    .lastFrame = 0.0f,
+  };
+  float vertices[] = {
+    // positions          // normals           // texture coords
+    -0.5f, -0.5f, -0.5f,  0.0f,  0.0f, -1.0f,  0.0f,  0.0f,
+     0.5f, -0.5f, -0.5f,  0.0f,  0.0f, -1.0f,  1.0f,  0.0f,
+     0.5f,  0.5f, -0.5f,  0.0f,  0.0f, -1.0f,  1.0f,  1.0f,
+     0.5f,  0.5f, -0.5f,  0.0f,  0.0f, -1.0f,  1.0f,  1.0f,
+    -0.5f,  0.5f, -0.5f,  0.0f,  0.0f, -1.0f,  0.0f,  1.0f,
+    -0.5f, -0.5f, -0.5f,  0.0f,  0.0f, -1.0f,  0.0f,  0.0f,
+
+    -0.5f, -0.5f,  0.5f,  0.0f,  0.0f,  1.0f,  0.0f,  0.0f,
+     0.5f, -0.5f,  0.5f,  0.0f,  0.0f,  1.0f,  1.0f,  0.0f,
+     0.5f,  0.5f,  0.5f,  0.0f,  0.0f,  1.0f,  1.0f,  1.0f,
+     0.5f,  0.5f,  0.5f,  0.0f,  0.0f,  1.0f,  1.0f,  1.0f,
+    -0.5f,  0.5f,  0.5f,  0.0f,  0.0f,  1.0f,  0.0f,  1.0f,
+    -0.5f, -0.5f,  0.5f,  0.0f,  0.0f,  1.0f,  0.0f,  0.0f,
+
+    -0.5f,  0.5f,  0.5f, -1.0f,  0.0f,  0.0f,  1.0f,  0.0f,
+    -0.5f,  0.5f, -0.5f, -1.0f,  0.0f,  0.0f,  1.0f,  1.0f,
+    -0.5f, -0.5f, -0.5f, -1.0f,  0.0f,  0.0f,  0.0f,  1.0f,
+    -0.5f, -0.5f, -0.5f, -1.0f,  0.0f,  0.0f,  0.0f,  1.0f,
+    -0.5f, -0.5f,  0.5f, -1.0f,  0.0f,  0.0f,  0.0f,  0.0f,
+    -0.5f,  0.5f,  0.5f, -1.0f,  0.0f,  0.0f,  1.0f,  0.0f,
+
+     0.5f,  0.5f,  0.5f,  1.0f,  0.0f,  0.0f,  1.0f,  0.0f,
+     0.5f,  0.5f, -0.5f,  1.0f,  0.0f,  0.0f,  1.0f,  1.0f,
+     0.5f, -0.5f, -0.5f,  1.0f,  0.0f,  0.0f,  0.0f,  1.0f,
+     0.5f, -0.5f, -0.5f,  1.0f,  0.0f,  0.0f,  0.0f,  1.0f,
+     0.5f, -0.5f,  0.5f,  1.0f,  0.0f,  0.0f,  0.0f,  0.0f,
+     0.5f,  0.5f,  0.5f,  1.0f,  0.0f,  0.0f,  1.0f,  0.0f,
+
+    -0.5f, -0.5f, -0.5f,  0.0f, -1.0f,  0.0f,  0.0f,  1.0f,
+     0.5f, -0.5f, -0.5f,  0.0f, -1.0f,  0.0f,  1.0f,  1.0f,
+     0.5f, -0.5f,  0.5f,  0.0f, -1.0f,  0.0f,  1.0f,  0.0f,
+     0.5f, -0.5f,  0.5f,  0.0f, -1.0f,  0.0f,  1.0f,  0.0f,
+    -0.5f, -0.5f,  0.5f,  0.0f, -1.0f,  0.0f,  0.0f,  0.0f,
+    -0.5f, -0.5f, -0.5f,  0.0f, -1.0f,  0.0f,  0.0f,  1.0f,
+
+    -0.5f,  0.5f, -0.5f,  0.0f,  1.0f,  0.0f,  0.0f,  1.0f,
+     0.5f,  0.5f, -0.5f,  0.0f,  1.0f,  0.0f,  1.0f,  1.0f,
+     0.5f,  0.5f,  0.5f,  0.0f,  1.0f,  0.0f,  1.0f,  0.0f,
+     0.5f,  0.5f,  0.5f,  0.0f,  1.0f,  0.0f,  1.0f,  0.0f,
+    -0.5f,  0.5f,  0.5f,  0.0f,  1.0f,  0.0f,  0.0f,  0.0f,
+    -0.5f,  0.5f, -0.5f,  0.0f,  1.0f,  0.0f,  0.0f,  1.0f
+  };
+  std::vector<glm::vec3> cubePositions = {
+    glm::vec3( 0.0f,  0.0f,  0.0f),
+    glm::vec3( 2.0f,  5.0f, -15.0f),
+    glm::vec3(-1.5f, -2.2f, -2.5f),
+    glm::vec3(-3.8f, -2.0f, -12.3f),
+    glm::vec3( 2.4f, -0.4f, -3.5f),
+    glm::vec3(-1.7f,  3.0f, -7.5f),
+    glm::vec3( 1.3f, -2.0f, -2.5f),
+    glm::vec3( 1.5f,  2.0f, -2.5f),
+    glm::vec3( 1.5f,  0.2f, -1.5f),
+    glm::vec3(-1.3f,  1.0f, -1.5f)
+  };
+  std::vector<glm::vec3> lightPositions = {
+    glm::vec3( 0.7f,  0.2f,  2.0f),
+    glm::vec3( 2.3f, -3.3f, -4.0f),
+    glm::vec3(-4.0f,  2.0f, -12.0f),
+    glm::vec3( 0.0f,  0.0f, -3.0f)
+  };
+  ImVec4 clearColor = ImVec4(0.1f, 0.1f, 0.1f, 1.00f);
+
+  std::cout << "Starting GLFW context" << std::endl;
+  glfwInit();
+  glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+  glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+  glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+  glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
+  glfwWindowHint(GLFW_RESIZABLE, GL_FALSE);
+  GLFWwindow* window = glfwCreateWindow(width, height, "LearnOpenGL", NULL, NULL);
+  glfwMakeContextCurrent(window);
+  if (window == NULL)
+  {
+    std::cout << "Failed to create GLFW window" << std::endl;
+    glfwTerminate();
+    return EXIT_FAILURE;
+  }
+  int version = gladLoadGL(glfwGetProcAddress);
+  if (version == -1)
+  {
+    std::cout << "Failed to initialize OpenGL context" << std::endl;
+    return EXIT_FAILURE;
+  }
+  std::cout << "Loaded OpenGL " << GLAD_VERSION_MAJOR(version) << "." << GLAD_VERSION_MINOR(version) << std::endl;
+  int containerTextureWidth, containerTextureHeight, containerTextureNrChannel;
+  unsigned char *containerTextureData = readImage(containerTextureFilePath, containerTextureWidth, containerTextureHeight, containerTextureNrChannel);
+  if (!containerTextureData)
+  {
+    std::cout << "Failed to load containerTexture" << std::endl;
+    return EXIT_FAILURE;
+  }
+  int containerSpecularTextureWidth, containerSpecularTextureHeight, containerSpecularTextureNrChannel;
+  unsigned char *containerSpecularTextureData = readImage(containerSpecularTextureFilePath, containerSpecularTextureWidth, containerSpecularTextureHeight, containerSpecularTextureNrChannel);
+  if (!containerSpecularTextureData)
+  {
+    std::cout << "Failed to load containerSpecularTexture" << std::endl;
+    return EXIT_FAILURE;
+  }
+  ImGui::CreateContext();
+  ImGuiIO& io = ImGui::GetIO(); (void)io;
+  ImGui::StyleColorsDark();
+  ImGui_ImplGlfw_InitForOpenGL(window, true);
+  ImGui_ImplOpenGL3_Init("#version 330");
+  std::string cubeVertexShaderSource = readFile(cubeVertexShaderFilePath);
+  std::string cubeFragmentShaderSource = readFile(cubeFragmentShaderFilePath);
+  unsigned int cubeVertexShader = { createShader(GL_VERTEX_SHADER, cubeVertexShaderSource.c_str()) }; // generated and assign unique shader ID
+  unsigned int cubeFragmentShader = { createShader(GL_FRAGMENT_SHADER, cubeFragmentShaderSource.c_str()) }; // generated and assign unique shader ID
+  std::vector<unsigned int> cubeShaders = {cubeVertexShader, cubeFragmentShader};
+  unsigned int cubeShaderProgram = { createShaderProgram(cubeShaders) };                                                                                           
+  std::string lightSourceVertexShaderSource = readFile(lightSourceVertexShaderFilePath);
+  std::string lightSourceFragmentShaderSource = readFile(lightSourceFragmentShaderFilePath);
+  unsigned int lightSourceVertexShader = { createShader(GL_VERTEX_SHADER, lightSourceVertexShaderSource.c_str()) }; // generated and assign unique shader ID
+  unsigned int lightSourceFragmentShader = { createShader(GL_FRAGMENT_SHADER, lightSourceFragmentShaderSource.c_str()) }; // generated and assign unique shader ID
+  std::vector<unsigned int> lightSourceShaders = {lightSourceVertexShader, lightSourceFragmentShader};
+  unsigned int lightSourceShaderProgram = { createShaderProgram(lightSourceShaders) };                                                                                           
+  unsigned int vbo;
+  glGenBuffers(1, &vbo);
+  glBindBuffer(GL_ARRAY_BUFFER, vbo);
+  glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
+  unsigned int cubeVao;
+  glGenVertexArrays(1, &cubeVao);
+  glBindVertexArray(cubeVao);
+  glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)0);
+  glEnableVertexAttribArray(0);
+  glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(3 * sizeof(float)));
+  glEnableVertexAttribArray(1);
+  glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(6 * sizeof(float)));
+  glEnableVertexAttribArray(2);
+  unsigned int containerTexture;
+  glGenTextures(1, &containerTexture);
+  glBindTexture(GL_TEXTURE_2D, containerTexture);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, containerTextureWidth, containerTextureHeight, 0, textureFormatFromChannel(containerTextureNrChannel), GL_UNSIGNED_BYTE, containerTextureData);
+  glGenerateMipmap(GL_TEXTURE_2D);
+  stbi_image_free(containerTextureData);
+  unsigned int containerSpecularTexture;
+  glGenTextures(1, &containerSpecularTexture);
+  glBindTexture(GL_TEXTURE_2D, containerSpecularTexture);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, containerSpecularTextureWidth, containerSpecularTextureHeight, 0, textureFormatFromChannel(containerSpecularTextureNrChannel), GL_UNSIGNED_BYTE, containerSpecularTextureData);
+  glGenerateMipmap(GL_TEXTURE_2D);
+  stbi_image_free(containerSpecularTextureData);
+  unsigned int lightSourceVao;
+  glGenVertexArrays(1, &lightSourceVao);
+  glBindVertexArray(lightSourceVao);
+  glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)0);
+  glEnableVertexAttribArray(0);
+  glEnable(GL_DEPTH_TEST);
+  glViewport(0, 0, width, height);
+  glfwSetWindowUserPointer(window, &state);
+  glfwSetFramebufferSizeCallback(window, handleFrameBufferUpdate);
+  glfwSetCursorPosCallback(window, handleMouseUpdate);
+  glfwSetScrollCallback(window, handleScrollUpdate);
+  while (!glfwWindowShouldClose(window))
+  {
+    float time = (float)glfwGetTime();
+    handleInput(window, &state);
+    state.deltaTime = time - state.lastFrame;
+    state.lastFrame = time;
+    float radius = 10.0f;
+    glm::mat4 view = glm::lookAt(state.cameraPosition, state.cameraPosition + state.cameraFront, state.cameraUp);
+    glm::mat4 projection = glm::perspective(glm::radians(state.fov), (float)width / (float)height, 0.1f, 100.f);
+    glfwPollEvents();
+    ImGui_ImplOpenGL3_NewFrame();
+    ImGui_ImplGlfw_NewFrame();
+    ImGui::NewFrame();
+    ImGui::Begin("Adjust clear color");
+    ImGui::ColorEdit3("clear color", (float*)&clearColor); // Edit 3 floats representing a color
+    ImGui::End();
+    ImGui::Render();
+    glClearColor(clearColor.x * clearColor.w, clearColor.y * clearColor.w, clearColor.z * clearColor.w, clearColor.w);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glUseProgram(cubeShaderProgram);
+    glBindVertexArray(cubeVao);
+    glUniform1f(glGetUniformLocation(cubeShaderProgram, "material.diffuse"), 0);
+    glUniform1f(glGetUniformLocation(cubeShaderProgram, "material.specular"), 1);
+    glUniform1f(glGetUniformLocation(cubeShaderProgram, "material.shininess"), 64.0f);
+    glUniform3fv(glGetUniformLocation(cubeShaderProgram, "viewPosition"), 1, glm::value_ptr(state.cameraPosition));
+    for (int i = 0; i < lightPositions.size(); ++i)
+    {
+      glUniform3fv(glGetUniformLocation(cubeShaderProgram, fmt::format("pointLights[{}].position", i).c_str()), 1, glm::value_ptr(lightPositions[i]));
+      glUniform3fv(glGetUniformLocation(cubeShaderProgram, fmt::format("pointLights[{}].ambient", i).c_str()), 1, glm::value_ptr(glm::vec3(0.05f, 0.05f, 0.05f)));
+      glUniform3fv(glGetUniformLocation(cubeShaderProgram, fmt::format("pointLights[{}].diffuse", i).c_str()), 1, glm::value_ptr(glm::vec3(0.8f, 0.8f, 0.8f)));
+      glUniform3fv(glGetUniformLocation(cubeShaderProgram, fmt::format("pointLights[{}].specular", i).c_str()), 1, glm::value_ptr(glm::vec3(1.0f, 1.0f, 1.0f)));
+      glUniform1f(glGetUniformLocation(cubeShaderProgram, fmt::format("pointLights[{}].constant", i).c_str()), 1.0f);
+      glUniform1f(glGetUniformLocation(cubeShaderProgram, fmt::format("pointLights[{}].linear", i).c_str()), 0.09f);
+      glUniform1f(glGetUniformLocation(cubeShaderProgram, fmt::format("pointLights[{}].quadratic", i).c_str()), 0.032f);
+    }
+    glUniform3fv(glGetUniformLocation(cubeShaderProgram, "directionalLight.direction"), 1, glm::value_ptr(glm::vec3(-0.2f, -1.0f, -0.3f)));
+    glUniform3fv(glGetUniformLocation(cubeShaderProgram, "directionalLight.ambient"), 1, glm::value_ptr(glm::vec3(0.05f, 0.05f, 0.05f)));
+    glUniform3fv(glGetUniformLocation(cubeShaderProgram, "directionalLight.diffuse"), 1, glm::value_ptr(glm::vec3(0.4f, 0.4f, 0.4f)));
+    glUniform3fv(glGetUniformLocation(cubeShaderProgram, "directionalLight.specular"), 1, glm::value_ptr(glm::vec3(0.5f, 0.5f, 0.5f)));
+    glUniform3fv(glGetUniformLocation(cubeShaderProgram, "spotLight.position"), 1, glm::value_ptr(state.cameraPosition));
+    glUniform3fv(glGetUniformLocation(cubeShaderProgram, "spotLight.direction"), 1, glm::value_ptr(state.cameraFront));
+    glUniform3fv(glGetUniformLocation(cubeShaderProgram, "spotLight.ambient"), 1, glm::value_ptr(glm::vec3(0.2f, 0.2f, 0.2f)));
+    glUniform3fv(glGetUniformLocation(cubeShaderProgram, "spotLight.diffuse"), 1, glm::value_ptr(glm::vec3(0.5f, 0.5f, 0.5f)));
+    glUniform3fv(glGetUniformLocation(cubeShaderProgram, "spotLight.specular"), 1, glm::value_ptr(glm::vec3(1.0f, 1.0f, 1.0f)));
+    glUniform1f(glGetUniformLocation(cubeShaderProgram, "spotLight.cutOff"), glm::cos(glm::radians(12.5f)));
+    glUniform1f(glGetUniformLocation(cubeShaderProgram, "spotLight.outerCutOff"), glm::cos(glm::radians(17.5f)));
+    glUniform1f(glGetUniformLocation(cubeShaderProgram, "spotLight.constant"), 1.0f);
+    glUniform1f(glGetUniformLocation(cubeShaderProgram, "spotLight.linear"), 0.09f);
+    glUniform1f(glGetUniformLocation(cubeShaderProgram, "spotLight.quadratic"), 0.032f);
+    glUniformMatrix4fv(glGetUniformLocation(cubeShaderProgram, "view"), 1, GL_FALSE, glm::value_ptr(view));
+    glUniformMatrix4fv(glGetUniformLocation(cubeShaderProgram, "projection"), 1, GL_FALSE, glm::value_ptr(projection));
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, containerTexture);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, containerSpecularTexture);
+    for (int i = 0; i < cubePositions.size(); ++i)
+    {
+      glm::vec3 cubePosition = cubePositions[i];
+      glm::mat4 model = glm::mat4(1.0f); // make sure to initialize matrix to identity matrix first
+      model = glm::translate(model, cubePosition);
+      model = glm::rotate(model, (float)i * glm::radians(50.0f), glm::vec3(0.5f, 0.5f, 0.0f));
+      glUniformMatrix4fv(glGetUniformLocation(cubeShaderProgram, "model"), 1, GL_FALSE, glm::value_ptr(model));
+      glDrawArrays(GL_TRIANGLES, 0, 36);
+    }
+    glUseProgram(lightSourceShaderProgram);
+    glBindVertexArray(lightSourceVao);
+    glUniformMatrix4fv(glGetUniformLocation(lightSourceShaderProgram, "view"), 1, GL_FALSE, glm::value_ptr(view));
+    glUniformMatrix4fv(glGetUniformLocation(lightSourceShaderProgram, "projection"), 1, GL_FALSE, glm::value_ptr(projection));
+    for (int i = 0; i < lightPositions.size(); ++i)
+    {
+      glm::vec3 lightPosition = lightPositions[i];
+      glm::mat4 model = glm::mat4(1.0f); // make sure to initialize matrix to identity matrix first
+      model = glm::translate(model, lightPosition);
+      model = glm::scale(model, glm::vec3(0.2f));
+      glUniformMatrix4fv(glGetUniformLocation(lightSourceShaderProgram, "model"), 1, GL_FALSE, glm::value_ptr(model));
+      glDrawArrays(GL_TRIANGLES, 0, 36);
+    }
+    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+    glfwSwapBuffers(window);
+  }
+  ImGui_ImplOpenGL3_Shutdown();
+  ImGui_ImplGlfw_Shutdown();
+  ImGui::DestroyContext();
+  for (unsigned int shader : cubeShaders)
+  {
+    glDeleteShader(shader);
+  }
+  glDeleteVertexArrays(1, &cubeVao);
+  glDeleteBuffers(1, &vbo);
+  glfwTerminate();
+  return EXIT_SUCCESS;
+}

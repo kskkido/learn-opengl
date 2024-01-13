@@ -1,0 +1,5 @@
+function main() {
+  cd ./build; cmake --build .;
+}
+
+main "$@"
